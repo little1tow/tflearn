@@ -71,7 +71,8 @@ class SequenceGenerator(object):
 
     def fit(self, X_inputs, Y_targets, n_epoch=10, validation_set=None,
             show_metric=False, batch_size=None, shuffle=None,
-            snapshot_epoch=True, snapshot_step=None, run_id=None):
+            snapshot_epoch=True, snapshot_step=None, excl_trainops=None,
+            run_id=None):
         """ Fit.
 
         Train model, feeding X_inputs and Y_targets to the network.
@@ -117,6 +118,9 @@ class SequenceGenerator(object):
                 'checkpoint_path' specified).
             snapshot_step: `int` or None. If `int`, it will snapshot model
                 every 'snapshot_step' steps.
+            excl_trainops: `list` of `TrainOp`. A list of train ops to
+                exclude from training process (TrainOps can be retrieve
+                through `tf.get_collection_ref(tf.GraphKeys.TRAIN_OPS)`).
             run_id: `str`. Give a name for this run. (Useful for Tensorboard).
 
         """
@@ -141,9 +145,22 @@ class SequenceGenerator(object):
 
         val_feed_dicts = None
         if not (is_none(valX) or is_none(valY)):
-            val_feed_dict = feed_dict_builder(valX, valY, self.inputs,
-                                              self.targets)
-            val_feed_dicts = [val_feed_dict for i in self.train_ops]
+            if isinstance(valX, float):
+                val_feed_dicts = valX
+            else:
+                val_feed_dict = feed_dict_builder(valX, valY, self.inputs,
+                                                  self.targets)
+                val_feed_dicts = [val_feed_dict for i in self.train_ops]
+
+        # Retrieve data preprocesing and augmentation
+        dprep_dict, daug_dict = {}, {}
+        dprep_collection = tf.get_collection(tf.GraphKeys.DATA_PREP)
+        daug_collection = tf.get_collection(tf.GraphKeys.DATA_AUG)
+        for i in range(len(self.inputs)):
+            if dprep_collection[i] is not None:
+                dprep_dict[self.inputs[i]] = dprep_collection[i]
+            if daug_collection[i] is not None:
+                daug_dict[self.inputs[i]] = daug_collection[i]
 
         self.trainer.fit(feed_dicts, val_feed_dicts=val_feed_dicts,
                          n_epoch=n_epoch,
@@ -151,6 +168,9 @@ class SequenceGenerator(object):
                          snapshot_step=snapshot_step,
                          snapshot_epoch=snapshot_epoch,
                          shuffle_all=shuffle,
+                         dprep_dict=dprep_dict,
+                         daug_dict=daug_dict,
+                         excl_trainops=excl_trainops,
                          run_id=run_id)
         self.predictor = Evaluator([self.net],
                                    session=self.trainer.session)
@@ -233,7 +253,9 @@ class SequenceGenerator(object):
         self.session = self.trainer.session
         self.predictor = Evaluator([self.net],
                                    session=self.session,
-                                   model=model_file)
+                                   model=None)
+        for d in tf.get_collection(tf.GraphKeys.DATA_PREP):
+            if d: d.restore_params(self.session)
 
     def get_weights(self, weight_tensor):
         """ Get weights.

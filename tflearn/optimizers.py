@@ -131,6 +131,7 @@ class SGD(Optimizer):
                 self.learning_rate, step_tensor,
                 self.decay_step, self.lr_decay,
                 staircase=self.staircase)
+            tf.add_to_collection(tf.GraphKeys.LR_VARIABLES, self.learning_rate)
         self.tensor = tf.train.GradientDescentOptimizer(
             learning_rate=self.learning_rate,
             use_locking=self.use_locking,
@@ -283,6 +284,8 @@ class Momentum(Optimizer):
         super(Momentum, self).__init__(learning_rate, use_locking, name)
         self.momentum = momentum
         self.lr_decay = lr_decay
+        if self.lr_decay > 0.:
+            self.has_decay = True
         self.decay_step = decay_step
         self.staircase = staircase
 
@@ -296,6 +299,7 @@ class Momentum(Optimizer):
                 self.learning_rate, step_tensor,
                 self.decay_step, self.lr_decay,
                 staircase=self.staircase)
+            tf.add_to_collection(tf.GraphKeys.LR_VARIABLES, self.learning_rate)
         self.tensor = tf.train.MomentumOptimizer(
             learning_rate=self.learning_rate,
             momentum=self.momentum,
@@ -412,3 +416,41 @@ class Ftrl(Optimizer):
                 use_locking=self.use_locking, name=self.name)
 
 ftrl = Ftrl
+
+
+class AdaDelta(Optimizer):
+    """ AdaDelta.
+
+    Construct a new Adadelta optimizer.
+
+    Arguments:
+        learning_rate: A `Tensor` or a floating point value. The learning rate.
+        rho: A `Tensor` or a floating point value. The decay rate.
+        epsilon: A `Tensor` or a floating point value.  A constant epsilon used
+            to better conditioning the grad update.
+        use_locking: If `True` use locks for update operations.
+        name: Optional name prefix for the operations created when applying
+            gradients.  Defaults to "Adadelta".
+
+    References:
+        ADADELTA: An Adaptive Learning Rate Method, Matthew D. Zeiler, 2012.
+
+    Links:
+        [http://arxiv.org/abs/1212.5701](http://arxiv.org/abs/1212.5701)
+
+    """
+
+    def __init__(self, learning_rate=0.001, rho=0.1, epsilon=1e-08,
+                 use_locking=False, name="AdaDelta"):
+        super(AdaDelta, self).__init__(learning_rate, use_locking, name)
+        self.rho = rho
+        self.epsilon = epsilon
+
+    def build(self, step_tensor=None):
+        self.built = True
+        self.tensor = tf.train.AdadeltaOptimizer(
+            self.learning_rate,
+            rho=self.rho, epsilon=self.epsilon,
+            use_locking=self.use_locking, name=self.name)
+
+adadelta = AdaDelta

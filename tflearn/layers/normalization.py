@@ -2,6 +2,7 @@
 from __future__ import division, print_function, absolute_import
 
 import tensorflow as tf
+from tensorflow.python.training import moving_averages
 
 import tflearn
 from .. import utils
@@ -9,8 +10,9 @@ from .. import variables as vs
 
 
 def batch_normalization(incoming, beta=0.0, gamma=1.0, epsilon=1e-5,
-                        decay=0.999, trainable=True, restore=True,
-                        stddev=0.002, name="BatchNormalization"):
+                        decay=0.9, stddev=0.002, trainable=True,
+                        restore=True, reuse=False, scope=None,
+                        name="BatchNormalization"):
     """ Batch Normalization.
 
     Normalize activations of the previous layer at each batch.
@@ -20,11 +22,16 @@ def batch_normalization(incoming, beta=0.0, gamma=1.0, epsilon=1e-5,
         beta: `float`. Default: 0.0.
         gamma: `float`. Default: 1.0.
         epsilon: `float`. Defalut: 1e-5.
-        decay: `float`. Default: 0.999.
+        decay: `float`. Default: 0.9.
+        stddev: `float`. Standard deviation for weights initialization.
         trainable: `bool`. If True, weights will be trainable.
         restore: `bool`. If True, this layer weights will be restored when
             loading a model.
-        stddev: `float`. Standard deviation for weights initialization.
+        reuse: `bool`. If True and 'scope' is provided, this layer variables
+            will be reused (shared).
+        scope: `str`. Define this layer scope (optional). A scope can be
+            used to share variables between layers. Note that scope will
+            override name.
         name: `str`. A name for this layer (optional).
 
     References:
@@ -41,51 +48,68 @@ def batch_normalization(incoming, beta=0.0, gamma=1.0, epsilon=1e-5,
 
     gamma_init = tf.random_normal_initializer(mean=gamma, stddev=stddev)
 
-    with tf.name_scope(name) as scope:
-        beta = vs.variable(scope + 'beta', shape=[input_shape[-1]],
+    with tf.variable_op_scope([incoming], scope, name, reuse=reuse) as scope:
+        name = scope.name
+        beta = vs.variable('beta', shape=[input_shape[-1]],
                            initializer=tf.constant_initializer(beta),
                            trainable=trainable, restore=restore)
-        gamma = vs.variable(scope + 'gamma', shape=[input_shape[-1]],
+        gamma = vs.variable('gamma', shape=[input_shape[-1]],
                             initializer=gamma_init, trainable=trainable,
                             restore=restore)
         # Track per layer variables
-        tf.add_to_collection(tf.GraphKeys.LAYER_VARIABLES + '/' + scope, beta)
-        tf.add_to_collection(tf.GraphKeys.LAYER_VARIABLES + '/' + scope, gamma)
+        tf.add_to_collection(tf.GraphKeys.LAYER_VARIABLES + '/' + name, beta)
+        tf.add_to_collection(tf.GraphKeys.LAYER_VARIABLES + '/' + name, gamma)
         if not restore:
             tf.add_to_collection(tf.GraphKeys.EXCL_RESTORE_VARS, beta)
             tf.add_to_collection(tf.GraphKeys.EXCL_RESTORE_VARS, gamma)
 
-        ema = tf.train.ExponentialMovingAverage(decay=decay)
-        axis = [i for i in range(input_ndim - 1)]
-        if len(axis) < 1: axis = [0]
-        batch_mean, batch_var = tf.nn.moments(incoming, axis,
-                                              name='moments')
-        ema_apply_op = ema.apply([batch_mean, batch_var])
-        ema_mean, ema_var = ema.average(batch_mean), ema.average(
-            batch_var)
+        axis = list(range(input_ndim - 1))
+        moving_mean = vs.variable('moving_mean',
+                                  input_shape[-1:],
+                                  initializer=tf.zeros_initializer,
+                                  trainable=False,
+                                  restore=restore)
+        moving_variance = vs.variable('moving_variance',
+                                      input_shape[-1:],
+                                      initializer=tf.ones_initializer,
+                                      trainable=False,
+                                      restore=restore)
 
+        # Define a function to update mean and variance
         def update_mean_var():
-            with tf.control_dependencies([ema_apply_op]):
-                return tf.identity(ema_mean), tf.identity(ema_var)
+            mean, variance = tf.nn.moments(incoming, axis)
+            update_moving_mean = moving_averages.assign_moving_average(
+                moving_mean, mean, decay)
+            update_moving_variance = moving_averages.assign_moving_average(
+                moving_variance, variance, decay)
+            with tf.control_dependencies(
+                    [update_moving_mean, update_moving_variance]):
+                return tf.identity(mean), tf.identity(variance)
 
+        # Retrieve variable managing training mode
         is_training = tflearn.get_training_mode()
         mean, var = tf.python.control_flow_ops.cond(
-            is_training, update_mean_var, lambda: (ema_mean, ema_var))
+            is_training, update_mean_var, lambda: (moving_mean, moving_variance))
 
         try:
             inference = tf.nn.batch_normalization(
                 incoming, mean, var, beta, gamma, epsilon)
+            inference.set_shape(input_shape)
         # Fix for old Tensorflow
         except Exception as e:
             inference = tf.nn.batch_norm_with_global_normalization(
                 incoming, mean, var, beta, gamma, epsilon,
                 scale_after_normalization=True,
             )
+            inference.set_shape(input_shape)
 
     # Add attributes for easy access
     inference.scope = scope
     inference.beta = beta
     inference.gamma = gamma
+
+    # Track output tensor.
+    tf.add_to_collection(tf.GraphKeys.LAYER_TENSOR + '/' + name, inference)
 
     return inference
 
@@ -109,6 +133,7 @@ def local_response_normalization(incoming, depth_radius=5, bias=1.0,
             Defaults to 1.0.
         alpha: `float`. A scale factor, usually positive. Defaults to 0.0001.
         beta: `float`. An exponent. Defaults to `0.5`.
+        name: `str`. A name for this layer (optional).
 
     """
 
@@ -118,5 +143,8 @@ def local_response_normalization(incoming, depth_radius=5, bias=1.0,
                               beta=beta, name=name)
 
     inference.scope = scope
+
+    # Track output tensor.
+    tf.add_to_collection(tf.GraphKeys.LAYER_TENSOR + '/' + name, inference)
 
     return inference

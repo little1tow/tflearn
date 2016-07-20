@@ -4,7 +4,12 @@ from __future__ import division, print_function, absolute_import
 import six
 import string
 import random
-import h5py
+try:
+    import h5py
+    H5PY_SUPPORTED = True
+except Exception as e:
+    print("hdf5 not supported (please install/reinstall h5py)")
+    H5PY_SUPPORTED = False
 import numpy as np
 import tensorflow as tf
 
@@ -30,6 +35,27 @@ def get_from_module(identifier, module_params, module_name, instantiate=False, k
 # ------------------
 #  Ops utils
 # ------------------
+
+def get_layer_by_name(name_or_scope):
+    """ get_layer.
+
+    Retrieve the output tensor of a layer with the given name or scope.
+
+    Arguments:
+        name_or_scope: `str`. The name (or scope) given to the layer to
+            retrieve.
+
+    Returns:
+        A Tensor.
+
+    """
+    # Track output tensor.
+    c = tf.get_collection(tf.GraphKeys.LAYER_TENSOR + '/' + name_or_scope)
+    if len(c) == 0:
+        raise Exception("No layer found for this name.")
+    if len(c) > 1:
+        return c
+    return c[0]
 
 
 def get_incoming_shape(incoming):
@@ -143,9 +169,9 @@ def del_duplicated(l):
     #return list(np.unique(np.array(l)))
 
 
-def make_batches(size, batch_size):
-    nb_batch = int(np.ceil(size/float(batch_size)))
-    return [(i*batch_size, min(size, (i+1)*batch_size)) for i in range(0, nb_batch)]
+def make_batches(samples_size, batch_size):
+    nb_batch = int(np.ceil(samples_size/float(batch_size)))
+    return [(i*batch_size, min(samples_size, (i+1)*batch_size)) for i in range(0, nb_batch)]
 
 
 def slice_array(X, start=None, stop=None):
@@ -154,13 +180,13 @@ def slice_array(X, start=None, stop=None):
             return [x[start] for x in X]
         else:
             return [x[start:stop] for x in X]
-    elif type(X) == h5py.Dataset:
-        return [X[i] for i in start]
+    if H5PY_SUPPORTED:
+        if type(X) == h5py.Dataset:
+            return [X[i] for i in start]
+    if hasattr(start, '__len__'):
+        return X[start]
     else:
-        if hasattr(start, '__len__'):
-            return X[start]
-        else:
-            return X[start:stop]
+        return X[start:stop]
 
 
 def get_dict_first_element(input_dict):
@@ -236,15 +262,26 @@ def feed_dict_builder(X, Y, net_inputs, net_targets):
         # If input data are not a dict, we match them by creation order
         if not isinstance(X, dict):
             # If validation split, copy that value to the whole placeholders
-            if isinstance(X, float): X = [X for _i in net_inputs]
+            if isinstance(X, float):
+                X = [X for _i in net_inputs]
             elif len(net_inputs) > 1:
-                if np.ndim(X) < 2:
-                    raise ValueError("Multiple inputs but only one data "
-                                     "feeded. Please verify number of inputs "
-                                     "and data provided match.")
-                elif len(X) != len(net_inputs):
-                    raise Exception(str(len(X)) + " inputs feeded, "
-                                    "but expected: " + str(len(net_inputs)))
+                try: #TODO: Fix brodcast issue if different
+                    if np.ndim(X) < 2:
+                        raise ValueError("Multiple inputs but only one data "
+                                         "feeded. Please verify number of "
+                                         "inputs and data provided match.")
+                    elif len(X) != len(net_inputs):
+                        raise Exception(str(len(X)) + " inputs feeded, "
+                                    "but expected: " + str(len(net_inputs)) +
+                                    ". If you are using notebooks, please "
+                                    "make sure that you didn't run graph "
+                                    "construction cell multiple time, "
+                                    "or try to enclose your graph within "
+                                    "`with tf.Graph().as_default():`")
+                except Exception:
+                    # Skip verif
+                    pass
+
             else:
                 X = [X]
             for i, x in enumerate(X):
@@ -267,14 +304,19 @@ def feed_dict_builder(X, Y, net_inputs, net_targets):
             if isinstance(Y, float):
                 Y = [Y for _t in net_targets]
             elif len(net_targets) > 1:
-                if np.ndim(Y) < 2:
-                    raise ValueError("Multiple outputs but only one data "
-                                     "feeded. Please verify number of outputs "
-                                     "and data provided match.")
-                elif len(Y) != len(net_targets):
-                    raise Exception(str(len(Y)) + " outputs feeded, "
-                                    "but expected: " + str(len(net_targets)))
-            else: Y = [Y]
+                try: #TODO: Fix brodcast issue if different
+                    if np.ndim(Y) < 2:
+                        raise ValueError("Multiple outputs but only one data "
+                                         "feeded. Please verify number of outputs "
+                                         "and data provided match.")
+                    elif len(Y) != len(net_targets):
+                        raise Exception(str(len(Y)) + " outputs feeded, "
+                                        "but expected: " + str(len(net_targets)))
+                except Exception:
+                    # skip verif
+                    pass
+            else:
+                Y = [Y]
             for i, y in enumerate(Y):
                 feed_dict[net_targets[i]] = y
         else:
@@ -312,6 +354,15 @@ def check_dir_name(dir_path):
         raise ValueError("Incorrect string format for directory path.")
 
 
+def check_restore_tensor(tensor_to_check, exclvars):
+    for exclvar in exclvars:
+        if isinstance(exclvar, str):
+            if exclvar.split(':')[0] in tensor_to_check.name:
+                return False
+        elif exclvar.name.split(':')[0] in tensor_to_check.name:
+                return False
+    return True
+
 # ----------------------------
 # Parameter formatting helpers
 # ----------------------------
@@ -319,35 +370,33 @@ def check_dir_name(dir_path):
 
 # Auto format kernel
 def autoformat_kernel_2d(strides):
-    if type(strides) is int:
+    if isinstance(strides, int):
         return [1, strides, strides, 1]
-    elif type(strides) in [tuple, list]:
+    elif isinstance(strides, (tuple, list)):
         if len(strides) == 2:
             return [1, strides[0], strides[1], 1]
         elif len(strides) == 4:
             return [strides[0], strides[1], strides[2], strides[3]]
         else:
-            if type(strides) in [tuple, list]:
-                raise Exception("strides length error: " + str(len(strides))
-                                + ", only a length of 2 or 4 is supported.")
-            else:
-                raise Exception("strides format error: " + str(type(strides)))
+            raise Exception("strides length error: " + str(len(strides))
+                            + ", only a length of 2 or 4 is supported.")
+    else:
+        raise Exception("strides format error: " + str(type(strides)))
 
 
 # Auto format filter size
 # Output shape: (rows, cols, input_depth, out_depth)
 def autoformat_filter_conv2d(fsize, in_depth, out_depth):
-    if type(fsize) is int:
+    if isinstance(fsize,int):
         return [fsize, fsize, in_depth, out_depth]
-    elif type(fsize) in [tuple, list]:
+    elif isinstance(fsize, (tuple, list)):
         if len(fsize) == 2:
             return [fsize[0], fsize[1], in_depth, out_depth]
         else:
-            if type(fsize) in [tuple, list]:
-                raise Exception("filter length error: " + str(len(fsize))
-                                + ", only a length of 2 or 4 is supported.")
-            else:
-                raise Exception("filter format error: " + str(type(fsize)))
+            raise Exception("filter length error: " + str(len(fsize))
+                            + ", only a length of 2 is supported.")
+    else:
+        raise Exception("filter format error: " + str(type(fsize)))
 
 
 # Auto format padding
@@ -355,4 +404,53 @@ def autoformat_padding(padding):
     if padding in ['same', 'SAME', 'valid', 'VALID']:
         return str.upper(padding)
     else:
-        raise Exception("Unknow padding! Accepted values: 'same', 'valid'.")
+        raise Exception("Unknown padding! Accepted values: 'same', 'valid'.")
+
+
+# Auto format filter size
+# Output shape: (rows, cols, input_depth, out_depth)
+def autoformat_filter_conv3d(fsize, in_depth, out_depth):
+    if isinstance(fsize, int):
+        return [fsize, fsize, fsize, in_depth, out_depth]
+    elif isinstance(fsize, (tuple, list)):
+        if len(fsize) == 3:
+            return [fsize[0], fsize[1],fsize[2], in_depth, out_depth]
+        else:
+            raise Exception("filter length error: " + str(len(fsize))
+                            + ", only a length of 3 is supported.")
+    else:
+        raise Exception("filter format error: " + str(type(fsize)))
+
+
+# Auto format stride for 3d convolution
+def autoformat_stride_3d(strides):
+    if isinstance(strides, int):
+        return [1, strides, strides, strides, 1]
+    elif isinstance(strides, (tuple, list)):
+        if len(strides) == 3:
+            return [1, strides[0], strides[1],strides[2], 1]
+        elif len(strides) == 5:
+            assert strides[0] == strides[4] == 1, "Must have strides[0] = strides[4] = 1"
+            return [strides[0], strides[1], strides[2], strides[3], strides[4]]
+        else:
+            raise Exception("strides length error: " + str(len(strides))
+                            + ", only a length of 3 or 5 is supported.")
+    else:
+        raise Exception("strides format error: " + str(type(strides)))
+
+
+# Auto format kernel for 3d convolution
+def autoformat_kernel_3d(kernel):
+    if isinstance(kernel, int):
+        return [1, 1, kernel, kernel, kernel]
+    elif isinstance(kernel, (tuple, list)):
+        if len(kernel) == 3:
+            return [1, 1, kernel[0], kernel[1], kernel[2]]
+        elif len(kernel) == 5:
+            assert kernel[0] == kernel[1] == 1, "Must have kernel_size[0] = kernel_size[1] = 1"
+            return [kernel[0], kernel[1], kernel[2], kernel[3], kernel[4]]
+        else:
+            raise Exception("kernel length error: " + str(len(kernel))
+                            + ", only a length of 3 or 5 is supported.")
+    else:
+        raise Exception("kernel format error: " + str(type(kernel)))

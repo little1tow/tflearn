@@ -125,3 +125,86 @@ def hinge_loss(y_pred, y_true):
     """
     with tf.name_scope("HingeLoss"):
         return tf.reduce_mean(tf.maximum(1. - y_true * y_pred, 0.))
+
+
+def roc_auc_score(y_pred, y_true):
+    """ ROC AUC Score.
+
+    Approximates the Area Under Curve score, using approximation based on
+    the Wilcoxon-Mann-Whitney U statistic.
+
+    Yan, L., Dodier, R., Mozer, M. C., & Wolniewicz, R. (2003).
+    Optimizing Classifier Performance via an Approximation to the Wilcoxon-Mann-Whitney Statistic.
+
+    Measures overall performance for a full range of threshold levels.
+
+    Arguments:
+        y_pred: `Tensor`. Predicted values.
+        y_true: `Tensor` . Targets (labels), a probability distribution.
+
+    """
+    with tf.name_scope("RocAucScore"):
+
+        pos = tf.boolean_mask(y_pred, tf.cast(y_true, tf.bool))
+        neg = tf.boolean_mask(y_pred, ~tf.cast(y_true, tf.bool))
+
+        pos = tf.expand_dims(pos, 0)
+        neg = tf.expand_dims(neg, 1)
+
+        # original paper suggests performance is robust to exact parameter choice
+        gamma = 0.2
+        p     = 3
+
+        difference = tf.zeros_like(pos * neg) + pos - neg - gamma
+
+        masked = tf.boolean_mask(difference, difference < 0.0)
+
+        return tf.reduce_sum(tf.pow(-masked, p))
+
+
+def weak_cross_entropy_2d(y_pred, y_true, num_classes=None, epsilon=0.0001,
+                          head=None):
+    """ Weak Crossentropy 2d.
+
+    Calculate the semantic segmentation using weak softmax cross entropy loss.
+
+    Given the prediction `y_pred` shaped as 2d image and the corresponding
+    y_true, this calculated the widely used semantic segmentation loss.
+    Using `tf.nn.softmax_cross_entropy_with_logits` is currently not supported.
+    See https://github.com/tensorflow/tensorflow/issues/2327#issuecomment-224491229
+
+    Arguments:
+        y_pred: `tensor, float` - [batch_size, width, height, num_classes].
+        y_true: `Labels tensor, int32` - [batch_size, width, height, num_classes].
+            The ground truth of your data.
+        head: `numpy array` - [num_classes]. Weighting the loss of each class.
+
+    Returns:
+        Loss tensor of type float.
+    """
+    if num_classes is None:
+        num_classes = y_true.get_shape()[-1]
+        # This only works, if y_true if shape of y_true is defined
+        assert (num_classes is not None)
+    with tf.name_scope('loss'):
+        y_pred = tf.reshape(y_pred, (-1, num_classes))
+        shape = [y_pred.get_shape()[0], num_classes]
+        epsilon = tf.constant(value=epsilon, shape=shape)
+        y_pred = y_pred + epsilon
+        y_true = tf.to_float(tf.reshape(y_true, (-1, num_classes)))
+
+        softmax = tf.nn.softmax(y_pred)
+
+        if head is not None:
+            cross_entropy = -tf.reduce_sum(tf.mul(y_true * tf.log(softmax),
+                                                  head), reduction_indices=[1])
+        else:
+            cross_entropy = -tf.reduce_sum(y_true * tf.log(softmax),
+                                           reduction_indices=[1])
+
+        cross_entropy_mean = tf.reduce_mean(cross_entropy,
+                                            name='xentropy_mean')
+        tf.add_to_collection('losses', cross_entropy_mean)
+
+        loss = tf.add_n(tf.get_collection('losses'), name='total_loss')
+    return loss

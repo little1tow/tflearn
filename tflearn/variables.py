@@ -5,6 +5,7 @@ import tensorflow as tf
 import tflearn
 
 
+@tf.contrib.framework.add_arg_scope
 def variable(name, shape=None, dtype=tf.float32, initializer=None,
              regularizer=None, trainable=True, collections=None, device='',
              restore=True):
@@ -34,6 +35,9 @@ def variable(name, shape=None, dtype=tf.float32, initializer=None,
 
     if isinstance(initializer, str):
         initializer = tflearn.initializations.get(initializer)()
+    # Remove shape param if initializer is a Tensor
+    if not callable(initializer) and isinstance(initializer, tf.Tensor):
+        shape = None
 
     if isinstance(regularizer, str):
         regularizer = tflearn.losses.get(regularizer)

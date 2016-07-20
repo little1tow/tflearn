@@ -1,3 +1,7 @@
+[![PyPI version](https://badge.fury.io/py/tflearn.svg)](https://badge.fury.io/py/tflearn)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Join the chat at https://gitter.im/einsteinsci/betterbeginnings](https://badges.gitter.im/tflearn/tflearn.svg)](https://gitter.im/tflearn/tflearn?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
+
 # TFLearn: Deep learning library featuring a higher-level API for TensorFlow.
 
 TFlearn is a modular and transparent deep learning library built on top of Tensorflow.  It was designed to provide a higher-level API to TensorFlow in order to facilitate and speed-up experimentations, while remaining fully transparent and compatible with it.
@@ -49,13 +53,19 @@ There are many more examples available *[here](http://tflearn.org/examples)*.
 
 **TensorFlow Installation**
 
-TFLearn requires Tensorflow (version >= 0.7) to be installed: *[Tensorflow installation instructions](https://github.com/tensorflow/tensorflow/blob/master/tensorflow/g3doc/get_started/os_setup.md)*.
+TFLearn requires Tensorflow (version >= 0.8) to be installed: *[Tensorflow installation instructions](https://github.com/tensorflow/tensorflow/blob/master/tensorflow/g3doc/get_started/os_setup.md)*.
 
 **TFLearn Installation**
 
-To install TFLearn, the easiest way is to run:
+To install TFLearn, the easiest way is to run
+
+For the bleeding edge version:
 ```python
 pip install git+https://github.com/tflearn/tflearn.git
+```
+For the latest stable version:
+```python
+pip install tflearn
 ```
 Otherwise, you can also install from source by running (from source folder):
 ```python

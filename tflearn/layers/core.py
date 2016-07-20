@@ -2,6 +2,7 @@ from __future__ import division, print_function, absolute_import
 
 import numpy as np
 import tensorflow as tf
+from tensorflow.python.ops import standard_ops
 
 import tflearn
 
@@ -13,15 +14,16 @@ from tflearn import losses
 
 
 def input_data(shape=None, placeholder=None, dtype=tf.float32,
+               data_preprocessing=None, data_augmentation=None,
                name="InputData"):
     """ Input Data.
 
-    `input_data` is used as a data entry (placeholder) of a network.
-    This placeholder will be feeded with data when training
+    This layer is used as a data entry (placeholder) of a network. The inner
+    placeholder will then be feeded with data when training.
 
     This layer is used to keep track of the network inputs, by adding the
     placeholder to INPUTS graphkey. TFLearn training functions may retrieve
-    those variables to setup the network training process.
+    these variables to setup the network training process.
 
     Input:
         List of `int` (Shape), to create a new placeholder.
@@ -41,13 +43,20 @@ def input_data(shape=None, placeholder=None, dtype=tf.float32,
             You can retrieve that placeholder through graph key: 'INPUTS',
             or the 'placeholder' attribute of this function's returned tensor.
         dtype: `tf.type`, Placeholder data type (optional). Default: float32.
+        data_preprocessing: A `DataPreprocessing` subclass object to manage
+            real-time data pre-processing when training and predicting (such
+            as zero center data, std normalization...).
+        data_augmentation: `DataAugmentation`. A `DataAugmentation` subclass
+            object to manage real-time data augmentation while training (
+            such as random image crop, random image flip, random sequence
+            reverse...).
         name: `str`. A name for this layer (optional).
 
     """
-    if not shape and not placeholder:
+    if not shape and placeholder is None:
         raise Exception("`shape` or `placeholder` argument is required.")
 
-    if not placeholder:
+    if placeholder is None:
         # Add 'None' if missing
         assert shape is not None, "A shape or a placeholder must be provided."
         if len(shape) > 1:
@@ -59,6 +68,12 @@ def input_data(shape=None, placeholder=None, dtype=tf.float32,
 
     # Keep track of inputs
     tf.add_to_collection(tf.GraphKeys.INPUTS, placeholder)
+    # Keep track of data preprocessing and augmentation
+    tf.add_to_collection(tf.GraphKeys.DATA_PREP, data_preprocessing)
+    tf.add_to_collection(tf.GraphKeys.DATA_AUG, data_augmentation)
+
+    # Track output tensor.
+    tf.add_to_collection(tf.GraphKeys.LAYER_TENSOR + '/' + name, placeholder)
 
     return placeholder
 
@@ -66,7 +81,8 @@ def input_data(shape=None, placeholder=None, dtype=tf.float32,
 def fully_connected(incoming, n_units, activation='linear', bias=True,
                     weights_init='truncated_normal', bias_init='zeros',
                     regularizer=None, weight_decay=0.001, trainable=True,
-                    restore=True, name="FullyConnected"):
+                    restore=True, reuse=False, scope=None,
+                    name="FullyConnected"):
     """ Fully Connected.
 
     A fully connected layer.
@@ -80,20 +96,26 @@ def fully_connected(incoming, n_units, activation='linear', bias=True,
     Arguments:
         incoming: `Tensor`. Incoming (2+)D Tensor.
         n_units: `int`, number of units for this layer.
-        activation: `str` (name) or `Tensor`. Activation applied to this layer.
-            (see tflearn.activations). Default: 'linear'.
+        activation: `str` (name) or `function` (returning a `Tensor`).
+            Activation applied to this layer (see tflearn.activations).
+            Default: 'linear'.
         bias: `bool`. If True, a bias is used.
         weights_init: `str` (name) or `Tensor`. Weights initialization.
             (see tflearn.initializations) Default: 'truncated_normal'.
         bias_init: `str` (name) or `Tensor`. Bias initialization.
             (see tflearn.initializations) Default: 'zeros'.
-       regularizer: `str` (name) or `Tensor`. Add a regularizer to this
+        regularizer: `str` (name) or `Tensor`. Add a regularizer to this
             layer weights (see tflearn.regularizers). Default: None.
-       weight_decay: `float`. Regularizer decay parameter. Default: 0.001.
-       trainable: `bool`. If True, weights will be trainable.
-       restore: `bool`. If True, this layer weights will be restored when
-            loading a model
-       name: A name for this layer (optional). Default: 'Dense'.
+        weight_decay: `float`. Regularizer decay parameter. Default: 0.001.
+        trainable: `bool`. If True, weights will be trainable.
+        restore: `bool`. If True, this layer weights will be restored when
+            loading a model.
+        reuse: `bool`. If True and 'scope' is provided, this layer variables
+            will be reused (shared).
+        scope: `str`. Define this layer scope (optional). A scope can be
+            used to share variables between layers. Note that scope will
+            override name.
+        name: A name for this layer (optional). Default: 'FullyConnected'.
 
     Attributes:
         scope: `Scope`. This layer scope.
@@ -102,27 +124,31 @@ def fully_connected(incoming, n_units, activation='linear', bias=True,
 
     """
     input_shape = utils.get_incoming_shape(incoming)
+    assert len(input_shape) > 1, "Incoming Tensor shape must be at least 2-D"
     n_inputs = int(np.prod(input_shape[1:]))
 
     # Build variables and inference.
-    with tf.name_scope(name) as scope:
+    with tf.variable_op_scope([incoming], scope, name, reuse=reuse) as scope:
+        name = scope.name
 
-        W_init = initializations.get(weights_init)()
+        W_init = weights_init
+        if isinstance(weights_init, str):
+            W_init = initializations.get(weights_init)()
         W_regul = None
         if regularizer:
             W_regul = lambda x: losses.get(regularizer)(x, weight_decay)
-        W = va.variable(scope + 'W', shape=[n_inputs, n_units],
-                        regularizer=W_regul, initializer=W_init,
-                        trainable=trainable, restore=restore)
-        tf.add_to_collection(tf.GraphKeys.LAYER_VARIABLES + '/' + scope, W)
+        W = va.variable('W', shape=[n_inputs, n_units], regularizer=W_regul,
+                        initializer=W_init, trainable=trainable,
+                        restore=restore)
+        tf.add_to_collection(tf.GraphKeys.LAYER_VARIABLES + '/' + name, W)
 
         b = None
         if bias:
-            b_init = initializations.get(bias_init)()
-            b = va.variable(scope + 'b', shape=[n_units],
-                            initializer=b_init, trainable=trainable,
-                            restore=restore)
-            tf.add_to_collection(tf.GraphKeys.LAYER_VARIABLES + '/' + scope, b)
+            if isinstance(bias, str):
+                bias_init = initializations.get(bias_init)()
+            b = va.variable('b', shape=[n_units], initializer=bias_init,
+                            trainable=trainable, restore=restore)
+            tf.add_to_collection(tf.GraphKeys.LAYER_VARIABLES + '/' + name, b)
 
         inference = incoming
         # If input is not 2d, flatten it.
@@ -131,7 +157,13 @@ def fully_connected(incoming, n_units, activation='linear', bias=True,
 
         inference = tf.matmul(inference, W)
         if b: inference = tf.nn.bias_add(inference, b)
-        inference = activations.get(activation)(inference)
+
+        if isinstance(activation, str):
+            inference = activations.get(activation)(inference)
+        elif hasattr(activation, '__call__'):
+            inference = activation(inference)
+        else:
+            raise ValueError("Invalid Activation.")
 
         # Track activations.
         tf.add_to_collection(tf.GraphKeys.ACTIVATIONS, inference)
@@ -140,6 +172,9 @@ def fully_connected(incoming, n_units, activation='linear', bias=True,
     inference.scope = scope
     inference.W = W
     inference.b = b
+
+    # Track output tensor.
+    tf.add_to_collection(tf.GraphKeys.LAYER_TENSOR + '/' + name, inference)
 
     return inference
 
@@ -181,6 +216,9 @@ def dropout(incoming, keep_prob, name="Dropout"):
 
         is_training = tflearn.get_training_mode()
         inference = tf.cond(is_training, apply_dropout, lambda: inference)
+
+    # Track output tensor.
+    tf.add_to_collection(tf.GraphKeys.LAYER_TENSOR + '/' + name, inference)
 
     return inference
 
@@ -228,6 +266,9 @@ def reshape(incoming, new_shape, name="Reshape"):
 
     inference.scope = scope
 
+    # Track output tensor.
+    tf.add_to_collection(tf.GraphKeys.LAYER_TENSOR + '/' + name, inference)
+
     return inference
 
 
@@ -246,12 +287,18 @@ def flatten(incoming, name="Flatten"):
         incoming: `Tensor`. The incoming tensor.
 
     """
-    input_shape = tflearn.utils.get_incoming_shape(incoming)
+    input_shape = utils.get_incoming_shape(incoming)
+    assert len(input_shape) > 1, "Incoming Tensor shape must be at least 2-D"
     dims = int(np.prod(input_shape[1:]))
-    return reshape(incoming, [-1, dims], name)
+    x = reshape(incoming, [-1, dims], name)
+
+    # Track output tensor.
+    tf.add_to_collection(tf.GraphKeys.LAYER_TENSOR + '/' + name, x)
+
+    return x
 
 
-def activation(incoming, activation='linear'):
+def activation(incoming, activation='linear', name='activation'):
 
     """ Activation.
 
@@ -259,21 +306,27 @@ def activation(incoming, activation='linear'):
 
     Arguments:
         incoming: A `Tensor`. The incoming tensor.
-        activation: `str` (name) or `Tensor`. Activation applied to this layer.
-            (see tflearn.activations). Default: 'linear'.
+        activation: `str` (name) or `function` (returning a `Tensor`).
+            Activation applied to this layer (see tflearn.activations).
+            Default: 'linear'.
 
     """
 
     if isinstance(activation, str):
-        return activations.get(activation)(incoming)
+        x = activations.get(activation)(incoming)
     elif hasattr(incoming, '__call__'):
-        return activation(incoming)
+        x = activation(incoming)
     else:
         raise ValueError('Unknown activation type.')
 
+    # Track output tensor.
+    tf.add_to_collection(tf.GraphKeys.LAYER_TENSOR + '/' + name, x)
+
+    return x
+
 
 def single_unit(incoming, activation='linear', bias=True, trainable=True,
-           restore=True, name="Linear"):
+                restore=True, reuse=False, scope=None, name="Linear"):
     """ Single Unit.
 
     A single unit (Linear) Layer.
@@ -286,13 +339,18 @@ def single_unit(incoming, activation='linear', bias=True, trainable=True,
 
     Arguments:
         incoming: `Tensor`. Incoming Tensor.
-        activation: `str` (name) or `Tensor`. Activation applied to this layer.
-            (see tflearn.activations). Default: 'linear'.
+        activation: `str` (name) or `function`. Activation applied to this
+            layer (see tflearn.activations). Default: 'linear'.
         bias: `bool`. If True, a bias is used.
         trainable: `bool`. If True, weights will be trainable.
         restore: `bool`. If True, this layer weights will be restored when
             loading a model.
-        name: A name for this layer (optional). Default: 'Dense'.
+        reuse: `bool`. If True and 'scope' is provided, this layer variables
+            will be reused (shared).
+        scope: `str`. Define this layer scope (optional). A scope can be
+            used to share variables between layers. Note that scope will
+            override name.
+        name: A name for this layer (optional). Default: 'Linear'.
 
     Attributes:
         W: `Tensor`. Variable representing weight.
@@ -303,19 +361,20 @@ def single_unit(incoming, activation='linear', bias=True, trainable=True,
     n_inputs = int(np.prod(input_shape[1:]))
 
     # Build variables and inference.
-    with tf.name_scope(name) as scope:
+    with tf.variable_op_scope([incoming], scope, name, reuse=reuse) as scope:
+        name = scope.name
 
-        W = va.variable(scope + 'W', shape=[n_inputs],
+        W = va.variable('W', shape=[n_inputs],
                         initializer=tf.constant_initializer(np.random.randn()),
                         trainable=trainable, restore=restore)
-        tf.add_to_collection(tf.GraphKeys.LAYER_VARIABLES + '/' + scope, W)
+        tf.add_to_collection(tf.GraphKeys.LAYER_VARIABLES + '/' + name, W)
 
         b = None
         if bias:
-            b = va.variable(scope + 'b', shape=[n_inputs],
+            b = va.variable('b', shape=[n_inputs],
                             initializer=tf.constant_initializer(np.random.randn()),
                             trainable=trainable, restore=restore)
-            tf.add_to_collection(tf.GraphKeys.LAYER_VARIABLES + '/' + scope, b)
+            tf.add_to_collection(tf.GraphKeys.LAYER_VARIABLES + '/' + name, b)
 
         inference = incoming
         # If input is not 2d, flatten it.
@@ -324,7 +383,13 @@ def single_unit(incoming, activation='linear', bias=True, trainable=True,
 
         inference = tf.mul(inference, W)
         if b: inference = tf.add(inference, b)
-        inference = activations.get(activation)(inference)
+
+        if isinstance(activation, str):
+            inference = activations.get(activation)(inference)
+        elif hasattr(activation, '__call__'):
+            inference = activation(inference)
+        else:
+            raise ValueError("Invalid Activation.")
 
         # Track activations.
         tf.add_to_collection(tf.GraphKeys.ACTIVATIONS, inference)
@@ -334,4 +399,164 @@ def single_unit(incoming, activation='linear', bias=True, trainable=True,
     inference.W = W
     inference.b = b
 
+    # Track output tensor.
+    tf.add_to_collection(tf.GraphKeys.LAYER_TENSOR + '/' + name, inference)
+
     return inference
+
+
+def highway(incoming, n_units, activation='linear', transform_dropout=None,
+            weights_init='truncated_normal', bias_init='zeros',
+            regularizer=None, weight_decay=0.001, trainable=True,
+            restore=True, reuse=False, scope=None,
+            name="FullyConnectedHighway"):
+    """ Fully Connected Highway.
+
+    A fully connected highway network layer, with some inspiration from
+    [https://github.com/fomorians/highway-fcn](https://github.com/fomorians/highway-fcn).
+
+    Input:
+        (2+)-D Tensor [samples, input dim]. If not 2D, input will be flatten.
+
+    Output:
+        2D Tensor [samples, n_units].
+
+    Arguments:
+        incoming: `Tensor`. Incoming (2+)D Tensor.
+        n_units: `int`, number of units for this layer.
+        activation: `str` (name) or `function` (returning a `Tensor`).
+            Activation applied to this layer (see tflearn.activations).
+            Default: 'linear'.
+        transform_dropout: `float`: Keep probability on the highway transform gate.
+        weights_init: `str` (name) or `Tensor`. Weights initialization.
+            (see tflearn.initializations) Default: 'truncated_normal'.
+        bias_init: `str` (name) or `Tensor`. Bias initialization.
+            (see tflearn.initializations) Default: 'zeros'.
+        regularizer: `str` (name) or `Tensor`. Add a regularizer to this
+            layer weights (see tflearn.regularizers). Default: None.
+        weight_decay: `float`. Regularizer decay parameter. Default: 0.001.
+        trainable: `bool`. If True, weights will be trainable.
+        restore: `bool`. If True, this layer weights will be restored when
+            loading a model
+        reuse: `bool`. If True and 'scope' is provided, this layer variables
+            will be reused (shared).
+        scope: `str`. Define this layer scope (optional). A scope can be
+            used to share variables between layers. Note that scope will
+            override name.
+        name: A name for this layer (optional). Default: 'FullyConnectedHighway'.
+
+    Attributes:
+        scope: `Scope`. This layer scope.
+        W: `Tensor`. Variable representing units weights.
+        W_t: `Tensor`. Variable representing units weights for transform gate.
+        b: `Tensor`. Variable representing biases.
+        b_t: `Tensor`. Variable representing biases for transform gate.
+
+    Links:
+        [https://arxiv.org/abs/1505.00387](https://arxiv.org/abs/1505.00387)
+
+    """
+    input_shape = utils.get_incoming_shape(incoming)
+    assert len(input_shape) > 1, "Incoming Tensor shape must be at least 2-D"
+    n_inputs = int(np.prod(input_shape[1:]))
+
+    # Build variables and inference.
+    with tf.variable_op_scope([incoming], scope, name, reuse=reuse) as scope:
+        name = scope.name
+
+        W_init = weights_init
+        if isinstance(weights_init, str):
+            W_init = initializations.get(weights_init)()
+        W_regul = None
+        if regularizer:
+            W_regul = lambda x: losses.get(regularizer)(x, weight_decay)
+        W = va.variable('W', shape=[n_inputs, n_units], regularizer=W_regul,
+                        initializer=W_init, trainable=trainable,
+                        restore=restore)
+        tf.add_to_collection(tf.GraphKeys.LAYER_VARIABLES + '/' + name, W)
+
+        if isinstance(bias_init, str):
+            bias_init = initializations.get(bias_init)()
+        b = va.variable('b', shape=[n_units], initializer=bias_init,
+                        trainable=trainable, restore=restore)
+        tf.add_to_collection(tf.GraphKeys.LAYER_VARIABLES + '/' + name, b)
+
+        # Weight and bias for the transform gate
+        W_T = va.variable('W_T', shape=[n_inputs, n_units],
+                          regularizer=None, initializer=W_init,
+                          trainable=trainable, restore=restore)
+        tf.add_to_collection(tf.GraphKeys.LAYER_VARIABLES + '/' + name, W_T)
+
+        b_T = va.variable('b_T', shape=[n_units],
+                          initializer=tf.constant_initializer(-1),
+                          trainable=trainable, restore=restore)
+        tf.add_to_collection(tf.GraphKeys.LAYER_VARIABLES + '/' + name, b_T)
+
+        # If input is not 2d, flatten it.
+        if len(input_shape) > 2:
+            incoming = tf.reshape(incoming, [-1, n_inputs])
+
+        if isinstance(activation, str):
+            activation = activations.get(activation)
+        elif hasattr(activation, '__call__'):
+            activation = activation
+        else:
+            raise ValueError("Invalid Activation.")
+
+        H = activation(tf.matmul(incoming, W) + b)
+        T = tf.sigmoid(tf.matmul(incoming, W_T) + b_T)
+        if transform_dropout:
+            T = dropout(T, transform_dropout)
+        C = tf.sub(1.0, T)
+
+        inference = tf.add(tf.mul(H, T), tf.mul(incoming, C))
+
+        # Track activations.
+        tf.add_to_collection(tf.GraphKeys.ACTIVATIONS, inference)
+
+    # Add attributes to Tensor to easy access weights.
+    inference.scope = scope
+    inference.W = W
+    inference.W_t = W_T
+    inference.b = b
+    inference.b_t = b_T
+
+    # Track output tensor.
+    tf.add_to_collection(tf.GraphKeys.LAYER_TENSOR + '/' + name, inference)
+
+    return inference
+
+
+def one_hot_encoding(target, n_classes, on_value=1.0, off_value=1.0,
+                     name="OneHotEncoding"):
+    """ One Hot Encoding.
+
+    Transform numeric labels into a binary vector.
+
+    Input:
+        The Labels Placeholder.
+
+    Output:
+        2-D Tensor, The encoded labels.
+
+    Arguments:
+        target: `Placeholder`. The labels placeholder.
+        n_classes: `int`. Total number of classes.
+        on_value: `scalar`. A scalar defining the on-value.
+        off_value: `scalar`. A scalar defining the off-value.
+        name: A name for this layer (optional). Default: 'OneHotEncoding'.
+
+    """
+
+    with tf.name_scope(name):
+        if target.dtype == tf.dtypes.int32:
+          target = standard_ops.to_int64(target)
+
+        target = standard_ops.one_hot(target, n_classes,
+                                      on_value=on_value,
+                                      off_value=off_value)
+
+    # Track output tensor.
+    tf.add_to_collection(tf.GraphKeys.LAYER_TENSOR + '/' + name, target)
+
+    return target

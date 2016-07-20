@@ -44,10 +44,6 @@ class DNN(object):
         assert isinstance(network, tf.Tensor), "'network' arg is not a Tensor!"
         self.net = network
         self.train_ops = tf.get_collection(tf.GraphKeys.TRAIN_OPS)
-        if len(self.train_ops) == 0:
-            raise Exception('tf collection "' + tf.GraphKeys.TRAIN_OPS + '" '
-                            'is empty! Please make sure you are using '
-                            '`regression` layer in your network.')
         self.trainer = Trainer(self.train_ops,
                                clip_gradients=clip_gradients,
                                tensorboard_dir=tensorboard_dir,
@@ -81,7 +77,8 @@ class DNN(object):
 
     def fit(self, X_inputs, Y_targets, n_epoch=10, validation_set=None,
             show_metric=False, batch_size=None, shuffle=None,
-            snapshot_epoch=True, snapshot_step=None, run_id=None):
+            snapshot_epoch=True, snapshot_step=None, excl_trainops=None,
+            run_id=None):
         """ Fit.
 
         Train model, feeding X_inputs and Y_targets to the network.
@@ -126,9 +123,17 @@ class DNN(object):
                 'checkpoint_path' specified).
             snapshot_step: `int` or None. If `int`, it will snapshot model
                 every 'snapshot_step' steps.
+            excl_trainops: `list` of `TrainOp`. A list of train ops to
+                exclude from training process (TrainOps can be retrieve
+                through `tf.get_collection_ref(tf.GraphKeys.TRAIN_OPS)`).
             run_id: `str`. Give a name for this run. (Useful for Tensorboard).
 
         """
+        if len(self.train_ops) == 0:
+            raise Exception('tf collection "' + tf.GraphKeys.TRAIN_OPS + '" '
+                            'is empty! Please make sure you are using '
+                            '`regression` layer in your network.')
+
         if batch_size:
             for train_op in self.train_ops:
                 train_op.batch_size = batch_size
@@ -154,15 +159,33 @@ class DNN(object):
         feed_dicts = [feed_dict for i in self.train_ops]
         val_feed_dicts = None
         if not (is_none(valX) or is_none(valY)):
-            val_feed_dict = feed_dict_builder(valX, valY, self.inputs,
-                                              self.targets)
-            val_feed_dicts = [val_feed_dict for i in self.train_ops]
+            if isinstance(valX, float):
+                val_feed_dicts = valX
+            else:
+                val_feed_dict = feed_dict_builder(valX, valY, self.inputs,
+                                                  self.targets)
+                val_feed_dicts = [val_feed_dict for i in self.train_ops]
+        # Retrieve data preprocesing and augmentation
+        dprep_dict, daug_dict = {}, {}
+        dprep_collection = tf.get_collection(tf.GraphKeys.DATA_PREP)
+        daug_collection = tf.get_collection(tf.GraphKeys.DATA_AUG)
+        for i in range(len(self.inputs)):
+            # Support for custom inputs not using dprep/daug
+            if len(dprep_collection) > i:
+                if dprep_collection[i] is not None:
+                    dprep_dict[self.inputs[i]] = dprep_collection[i]
+            if len(daug_collection) > i:
+                if daug_collection[i] is not None:
+                    daug_dict[self.inputs[i]] = daug_collection[i]
         self.trainer.fit(feed_dicts, val_feed_dicts=val_feed_dicts,
                          n_epoch=n_epoch,
                          show_metric=show_metric,
                          snapshot_step=snapshot_step,
                          snapshot_epoch=snapshot_epoch,
                          shuffle_all=shuffle,
+                         dprep_dict=dprep_dict,
+                         daug_dict=daug_dict,
+                         excl_trainops=excl_trainops,
                          run_id=run_id)
 
     def predict(self, X):
@@ -193,20 +216,25 @@ class DNN(object):
         #with self.graph.as_default():
         self.trainer.save(model_file)
 
-    def load(self, model_file):
+    def load(self, model_file, weights_only=False):
         """ Load.
 
         Restore model weights.
 
         Arguments:
             model_file: `str`. Model path.
-
+            weights_only: `bool`. If True, only weights will be restored (
+                and not intermediate variable, such as step counter, moving
+                averages...). Note that if you are using batch normalization,
+                averages will not be restored as well.
         """
-        self.trainer.restore(model_file)
+        self.trainer.restore(model_file, weights_only)
         self.session = self.trainer.session
         self.predictor = Evaluator([self.net],
                                    session=self.session,
-                                   model=model_file)
+                                   model=None)
+        for d in tf.get_collection(tf.GraphKeys.DATA_PREP):
+            if d: d.restore_params(self.session)
 
     def get_weights(self, weight_tensor):
         """ Get Weights.
@@ -241,10 +269,10 @@ class DNN(object):
         op = tf.assign(tensor, weights)
         self.trainer.session.run(op)
 
-    def evaluate(self, X, Y, batch_size):
+    def evaluate(self, X, Y, batch_size=128):
         """ Evaluate.
 
-        Evaluate model on given samples.
+        Evaluate model metric(s) on given samples.
 
         Arguments:
             X: array, `list` of array (if multiple inputs) or `dict`
@@ -257,9 +285,9 @@ class DNN(object):
             batch_size: `int`. The batch size. Default: 128.
 
         Returns:
-            The metric score.
+            The metric(s) score.
 
         """
         feed_dict = feed_dict_builder(X, Y, self.inputs, self.targets)
-        from tflearn.helpers.trainer import evaluate as ev
-        return ev(self.trainer.session, self.net, feed_dict, batch_size)
+        ops = [o.metric for o in self.train_ops]
+        return self.predictor.evaluate(feed_dict, ops, batch_size)
